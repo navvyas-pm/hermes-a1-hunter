@@ -43,8 +43,8 @@ jobs:
       - name: Hunt for A1 capacity (aggressive inner loop)
         run: |
           set -uo pipefail
-          MAX_INNER=14      # back-to-back attempts before re-dispatching (~45 min)
-          GAP=25            # short pause between attempts to dodge rate limits
+          MAX_INNER=10      # attempts before re-dispatching (~35-40 min)
+          GAP=90            # pause between attempts — Resource Manager throttles fast job creation
 
           running_id() {
             local r; r=$(oci compute instance list --compartment-id "$TENANCY" \
