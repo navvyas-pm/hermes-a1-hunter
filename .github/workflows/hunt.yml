@@ -1,26 +1,28 @@
 name: hermes-a1-hunt
 
 # Hunts for free Oracle A1 capacity by re-applying the saved Resource Manager
-# stack on a schedule. Runs in the cloud — independent of any local machine.
-# On success: creates a GitHub issue with the SSH line and disables this schedule.
+# stack. Each run fires back-to-back attempts for ~45 min, then re-dispatches
+# itself for continuous coverage. Cron is just a backstop if the chain breaks.
+# On success: attaches a public IP, opens a GitHub issue, disables the schedule.
 
 on:
   schedule:
-    - cron: '*/10 * * * *'   # every ~10 min (GitHub may delay/coalesce under load)
-  workflow_dispatch: {}       # allow manual runs
+    - cron: '*/20 * * * *'    # backstop only; runs self-chain between these
+  workflow_dispatch: {}
 
 permissions:
   contents: read
   issues: write
-  actions: write              # to disable the schedule once it lands
+  actions: write              # disable schedule on success / re-dispatch self
 
 concurrency:
   group: a1-hunt
-  cancel-in-progress: false   # never run two applies against the stack at once
+  cancel-in-progress: false   # never two applies against the stack at once
 
 jobs:
   hunt:
     runs-on: ubuntu-latest
+    timeout-minutes: 55
     env:
       OCI_CLI_USER: ${{ secrets.OCI_CLI_USER }}
       OCI_CLI_TENANCY: ${{ secrets.OCI_CLI_TENANCY }}
@@ -38,65 +40,66 @@ jobs:
           python3 -m pip install --quiet --user oci-cli
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Hunt for A1 capacity
+      - name: Hunt for A1 capacity (aggressive inner loop)
         run: |
           set -uo pipefail
+          MAX_INNER=14      # back-to-back attempts before re-dispatching (~45 min)
+          GAP=25            # short pause between attempts to dodge rate limits
 
-          # 0) Already have a running instance? Stop everything.
-          RUN=$(oci compute instance list --compartment-id "$TENANCY" \
+          running_id() {
+            local r; r=$(oci compute instance list --compartment-id "$TENANCY" \
                   --lifecycle-state RUNNING --query 'data[0].id' --raw-output 2>/dev/null || true)
-          if [ -n "${RUN:-}" ] && [ "$RUN" != "null" ]; then
-            echo "Instance already RUNNING ($RUN) — nothing to do; disabling schedule."
+            { [ -n "${r:-}" ] && [ "$r" != "null" ]; } && echo "$r"
+          }
+
+          R0=$(running_id || true)
+          if [ -n "${R0:-}" ]; then
+            echo "Instance already RUNNING ($R0); disabling schedule."
             gh workflow disable hunt.yml -R "$REPO" || true
             exit 0
           fi
 
-          # 1) Fire one apply attempt.
-          JOB=$(oci resource-manager job create-apply-job --stack-id "$STACK_ID" \
-                  --execution-plan-strategy AUTO_APPROVED --query 'data.id' --raw-output 2>/dev/null || true)
-          if [ -z "${JOB:-}" ]; then
-            echo "Could not create job (state-lock/transient). Will retry next run."
-            exit 0
-          fi
-          echo "Apply job: $JOB — polling (max ~7 min)..."
+          for n in $(seq 1 $MAX_INNER); do
+            echo "::group::Attempt $n/$MAX_INNER"
+            JOB=$(oci resource-manager job create-apply-job --stack-id "$STACK_ID" \
+                    --execution-plan-strategy AUTO_APPROVED --query 'data.id' --raw-output 2>/dev/null || true)
+            if [ -z "${JOB:-}" ]; then
+              echo "could not create job (lock/transient); pausing"; echo "::endgroup::"; sleep "$GAP"; continue
+            fi
+            echo "job $JOB — polling..."
+            STATE=""
+            for i in $(seq 1 42); do
+              S=$(oci resource-manager job get --job-id "$JOB" --query 'data."lifecycle-state"' --raw-output 2>/dev/null || true)
+              case "$S" in SUCCEEDED|FAILED|CANCELED) STATE="$S"; break ;; *) sleep 10 ;; esac
+            done
+            echo "state: ${STATE:-UNRESOLVED}"
 
-          # 2) Poll, bounded so a network blip can't hang the run.
-          STATE=""
-          for i in $(seq 1 42); do
-            S=$(oci resource-manager job get --job-id "$JOB" \
-                  --query 'data."lifecycle-state"' --raw-output 2>/dev/null || true)
-            case "$S" in
-              SUCCEEDED|FAILED|CANCELED) STATE="$S"; break ;;
-              *) sleep 10 ;;
-            esac
+            if [ "$STATE" = "SUCCEEDED" ]; then
+              INST=$(oci compute instance list --compartment-id "$TENANCY" --lifecycle-state RUNNING \
+                       --sort-by TIMECREATED --sort-order DESC --query 'data[0].id' --raw-output)
+              VNIC=$(oci compute instance list-vnics --instance-id "$INST" --query 'data[0].id' --raw-output)
+              PRIV=$(oci network private-ip list --vnic-id "$VNIC" --query 'data[0].id' --raw-output)
+              IP=$(oci network public-ip create --compartment-id "$TENANCY" --lifetime EPHEMERAL \
+                     --private-ip-id "$PRIV" --query 'data."ip-address"' --raw-output 2>/dev/null || true)
+              [ -z "${IP:-}" ] && IP=$(oci compute instance list-vnics --instance-id "$INST" --query 'data[0]."public-ip"' --raw-output)
+              echo "INSTANCE READY ip=$IP"
+              gh issue create -R "$REPO" --title "✅ Hermes VPS is up — $IP" \
+                --body "A1 capacity landed. SSH: \`ssh ubuntu@$IP\`  •  instance: $INST" || true
+              gh workflow disable hunt.yml -R "$REPO" || true
+              echo "::endgroup::"; exit 0
+            fi
+
+            if [ "$STATE" = "FAILED" ]; then
+              LOGS=$(oci resource-manager job get-job-logs-content --job-id "$JOB" --raw-output 2>/dev/null || true)
+              if printf '%s' "$LOGS" | grep -qiE 'out of (host )?capacity|capacity|too many requests|429'; then
+                echo "out-of-capacity"; echo "::endgroup::"; sleep "$GAP"; continue
+              else
+                echo "::error::Non-capacity failure:"; printf '%s\n' "$LOGS" | tail -25
+                echo "::endgroup::"; exit 1
+              fi
+            fi
+            echo "::endgroup::"; sleep "$GAP"
           done
-          echo "Job state: ${STATE:-UNRESOLVED}"
 
-          # 3) Success → grab a public IP, file an issue, disable the schedule.
-          if [ "$STATE" = "SUCCEEDED" ]; then
-            INST=$(oci compute instance list --compartment-id "$TENANCY" --lifecycle-state RUNNING \
-                     --sort-by TIMECREATED --sort-order DESC --query 'data[0].id' --raw-output)
-            VNIC=$(oci compute instance list-vnics --instance-id "$INST" --query 'data[0].id' --raw-output)
-            PRIV=$(oci network private-ip list --vnic-id "$VNIC" --query 'data[0].id' --raw-output)
-            IP=$(oci network public-ip create --compartment-id "$TENANCY" --lifetime EPHEMERAL \
-                   --private-ip-id "$PRIV" --query 'data."ip-address"' --raw-output 2>/dev/null || true)
-            [ -z "${IP:-}" ] && IP=$(oci compute instance list-vnics --instance-id "$INST" \
-                   --query 'data[0]."public-ip"' --raw-output)
-            echo "INSTANCE READY ip=$IP"
-            gh issue create -R "$REPO" \
-              --title "✅ Hermes VPS is up — $IP" \
-              --body "A1 capacity landed. SSH: \`ssh ubuntu@$IP\`  •  instance: $INST" || true
-            gh workflow disable hunt.yml -R "$REPO" || true
-            exit 0
-          fi
-
-          # 4) Failed → capacity (quiet retry) vs real error (fail the run so GitHub emails you).
-          LOGS=$(oci resource-manager job get-job-logs-content --job-id "$JOB" --raw-output 2>/dev/null || true)
-          if printf '%s' "$LOGS" | grep -qiE 'out of (host )?capacity|capacity|too many requests|429'; then
-            echo "Out of capacity — will retry next scheduled run."
-            exit 0
-          else
-            echo "::error::Non-capacity failure — needs a look:"
-            printf '%s\n' "$LOGS" | tail -25
-            exit 1
-          fi
+          echo "No capacity after $MAX_INNER attempts; re-dispatching for continuous coverage."
+          gh workflow run hunt.yml -R "$REPO" || true
