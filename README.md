@@ -15,19 +15,19 @@ Runs entirely in the cloud — no local machine needs to be on. cron fires every
 
 ## Regions
 
-Hunted in order (best Always-Free A1 availability first), configurable via the
-`REGIONS` env var in [`hunt.yml`](.github/workflows/hunt.yml):
+Currently set to the home region only, configurable via the `REGIONS` env var
+in [`hunt.yml`](.github/workflows/hunt.yml):
 
 ```
-us-phoenix-1  us-ashburn-1  ca-toronto-1  uk-london-1  ap-mumbai-1  us-sanjose-1
+us-sanjose-1
 ```
 
-> **Important — Always Free is home-region-only.** On a pure *Always Free* OCI
-> account, A1 instances can only be created in your **home region**, so the
-> extra regions won't help. Multi-region hunting only pays off on a **Pay As You
-> Go (upgraded)** account, where the A1 free monthly allowance (3000 OCPU-hours
-> / 18000 GB-hours) applies in any region. Trim `REGIONS` to just your home
-> region if you're on pure Always Free.
+> **Why just one region?** This is a pure *Always Free* OCI account, where A1
+> instances can only be created in the tenancy's **home region** (`us-sanjose-1`).
+> Other regions would only ever report out-of-capacity. Multi-region hunting
+> only pays off on a **Pay As You Go (upgraded)** account, where the A1 free
+> monthly allowance (3000 OCPU-hours / 18000 GB-hours) applies in any region —
+> add space-separated regions to `REGIONS` if you upgrade.
 
 ## How it works
 

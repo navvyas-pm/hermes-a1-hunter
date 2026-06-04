@@ -38,15 +38,15 @@ jobs:
       OCI_CLI_TENANCY: ${{ secrets.OCI_CLI_TENANCY }}
       OCI_CLI_FINGERPRINT: ${{ secrets.OCI_CLI_FINGERPRINT }}
       OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CLI_KEY_CONTENT }}
-      OCI_CLI_REGION: us-phoenix-1          # default; every call overrides via --region
+      OCI_CLI_REGION: us-sanjose-1          # default; every call overrides via --region
       TENANCY: ${{ secrets.OCI_CLI_TENANCY }}
       SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
       SUPPRESS_LABEL_WARNING: "True"
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
-      # Regions to hunt, best Always-Free A1 availability first. Space-separated.
-      # Override here to add/remove regions.
-      REGIONS: "us-phoenix-1 us-ashburn-1 ca-toronto-1 uk-london-1 ap-mumbai-1 us-sanjose-1"
+      # Home region only — this is a pure Always Free account, where A1 can only
+      # be created in the tenancy's home region. Space-separated if you add more.
+      REGIONS: "us-sanjose-1"
       SHAPE: "VM.Standard.A1.Flex"
       OCPUS: "4"
       MEM_GB: "24"
