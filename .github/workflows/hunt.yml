@@ -50,8 +50,8 @@ jobs:
       SHAPE: "VM.Standard.A1.Flex"
       OCPUS: "4"
       MEM_GB: "24"
-      SWEEPS: "3"        # full region sweeps before re-dispatching
-      GAP: "8"           # seconds between launch attempts (rate-limit friendly)
+      SWEEPS: "2"        # full region sweeps before re-dispatching
+      GAP: "30"          # seconds between launch attempts — avoids OCI TooManyRequests
     steps:
       - name: Install OCI CLI
         run: |
