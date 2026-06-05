@@ -161,13 +161,13 @@ jobs:
                 finish "$r" "$inst"
                 return 0
               fi
-              if printf '%s' "$out" | grep -qiE 'out of host capacity|out of capacity'; then
+              if printf '%s' "$out" | grep -qiE 'out of host capacity|out of capacity|capacity'; then
                 echo "  [$r/$ad] out-of-capacity"
-              elif printf '%s' "$out" | grep -qiE 'LimitExceeded|ServiceLimitExceeded|quota'; then
-                echo "  [$r/$ad] quota/limit reached — skipping region: $(printf '%s' "$out" | tail -1)"
+              elif printf '%s' "$out" | grep -qiE 'LimitExceeded|service limit|quota'; then
+                echo "  [$r/$ad] quota/limit reached — skipping region:"; printf '%s\n' "$out" | head -40
                 return 1
               else
-                echo "  [$r/$ad] attempt failed: $(printf '%s' "$out" | tail -2)"
+                echo "  [$r/$ad] non-capacity failure (full error):"; printf '%s\n' "$out" | head -40
               fi
               sleep "$GAP"
             done
