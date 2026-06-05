@@ -187,8 +187,11 @@ jobs:
             echo "::error::SSH_PUBLIC_KEY secret is empty. Add it (repo → Settings → Secrets) so the VPS is reachable."
             exit 1
           fi
-          # Write SSH key into instance metadata via a file (robust quoting).
-          printf '{"ssh_authorized_keys": %s}' "$(jq -Rs . <<<"$SSH_PUBLIC_KEY")" > /tmp/meta.json
+          # Normalize the key to a single clean line (strip CR / trailing newline /
+          # blank lines) and JSON-encode it — OCI rejects any stray whitespace with
+          # "Invalid format for ssh public key".
+          SSH_KEY_CLEAN=$(printf '%s' "$SSH_PUBLIC_KEY" | tr -d '\r' | awk 'NF{print; exit}')
+          jq -n --arg k "$SSH_KEY_CLEAN" '{ssh_authorized_keys: $k}' > /tmp/meta.json
 
           for sweep in $(seq 1 "$SWEEPS"); do
             echo "::group::Sweep $sweep/$SWEEPS"
