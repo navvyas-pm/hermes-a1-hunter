@@ -14,6 +14,11 @@ name: hermes-a1-hunt
 # risk landing two instances at once. The concurrency group below also prevents
 # two runs overlapping. cron (*/5) is a backstop; each run self-re-dispatches
 # for continuous coverage.
+#
+# Per AD it tries the full 4 OCPU / 24 GB shape, then falls back to 2 OCPU /
+# 12 GB on out-of-capacity (never lower — Ollama needs the RAM). During US
+# off-peak hours (09:00-13:00 UTC) it runs more sweeps with a tighter gap, since
+# capacity is likeliest to free up then.
 
 on:
   schedule:
@@ -48,10 +53,16 @@ jobs:
       # be created in the tenancy's home region. Space-separated if you add more.
       REGIONS: "us-sanjose-1"
       SHAPE: "VM.Standard.A1.Flex"
-      OCPUS: "4"
-      MEM_GB: "24"
-      SWEEPS: "2"        # full region sweeps before re-dispatching
-      GAP: "30"          # seconds between launch attempts — avoids OCI TooManyRequests
+      # OCPU/GB tiers, largest first. Each AD tries the full shape, then falls
+      # back a tier on out-of-capacity. Never below 2/12 — Ollama needs the RAM.
+      SHAPE_CONFIGS: "4/24 2/12"
+      # Peak-hours cadence (relaxed, avoids OCI TooManyRequests).
+      SWEEPS: "2"        # sweeps per run before re-dispatching
+      GAP: "30"          # seconds between AD attempts
+      # US off-peak (02:00-06:00 Pacific == 09:00-13:00 UTC) — most aggressive,
+      # since capacity is likeliest to free up then.
+      OFFPEAK_SWEEPS: "4"
+      OFFPEAK_GAP: "15"
     steps:
       - name: Install OCI CLI
         run: |
@@ -115,7 +126,7 @@ jobs:
 
           # --- On success: ensure a public IP, open the issue, disable the schedule. ---
           finish() {
-            local r="$1" inst="$2" vnic priv ip
+            local r="$1" inst="$2" shape="${3:-?}" vnic priv ip
             vnic=$(oci compute instance list-vnics --region "$r" --instance-id "$inst" \
                      --query 'data[0].id' --raw-output)
             ip=$(oci compute instance list-vnics --region "$r" --instance-id "$inst" \
@@ -127,15 +138,15 @@ jobs:
                      --lifetime EPHEMERAL --private-ip-id "$priv" \
                      --query 'data."ip-address"' --raw-output 2>/dev/null || true)
             fi
-            echo "INSTANCE READY region=$r ip=$ip instance=$inst"
-            gh issue create -R "$REPO" --title "✅ Hermes VPS is up — $ip ($r)" \
-              --body "Always Free A1 capacity landed in **$r**.  SSH: \`ssh ubuntu@$ip\`  •  instance: \`$inst\`" || true
+            echo "INSTANCE READY region=$r ip=$ip shape=$shape instance=$inst"
+            gh issue create -R "$REPO" --title "✅ Hermes VPS is up — $ip ($r, ${shape} A1)" \
+              --body "Always Free A1 (${shape} OCPU/GB) landed in **$r**.  SSH: \`ssh ubuntu@$ip\`  •  instance: \`$inst\`" || true
             gh workflow disable hunt.yml -R "$REPO" || true
           }
 
           # --- Try every availability domain in region $1; return 0 on a RUNNING instance. ---
           launch_region() {
-            local r="$1" subnet image ads ad inst out
+            local r="$1" subnet image ads ad cfg ocpus mem inst out
             subnet=$(ensure_subnet "$r")
             if [ -z "${subnet:-}" ]; then echo "  [$r] no subnet (network setup failed)"; return 1; fi
             image=$(latest_image "$r")
@@ -146,29 +157,36 @@ jobs:
             [ -z "${ads:-}" ] && { echo "  [$r] could not list availability domains"; return 1; }
 
             for ad in $ads; do
-              echo "  [$r/$ad] launching A1 ${OCPUS} OCPU / ${MEM_GB} GB ..."
-              inst=$(oci compute instance launch --region "$r" --compartment-id "$TENANCY" \
-                       --availability-domain "$ad" --shape "$SHAPE" \
-                       --shape-config "{\"ocpus\":$OCPUS,\"memoryInGBs\":$MEM_GB}" \
-                       --image-id "$image" --subnet-id "$subnet" --assign-public-ip true \
-                       --metadata file:///tmp/meta.json --display-name hermes-vps \
-                       --wait-for-state RUNNING --max-wait-seconds 300 --wait-interval-seconds 15 \
-                       --query 'data.id' --raw-output 2>/tmp/err) || inst=""
-              out=$(cat /tmp/err 2>/dev/null || true)
+              # Largest shape first; on out-of-capacity fall straight to the next
+              # (smaller) tier in the SAME AD before sleeping / moving on.
+              for cfg in $SHAPE_CONFIGS; do
+                ocpus=${cfg%/*}; mem=${cfg#*/}
+                echo "  [$r/$ad] launching A1 ${ocpus} OCPU / ${mem} GB ..."
+                inst=$(oci compute instance launch --region "$r" --compartment-id "$TENANCY" \
+                         --availability-domain "$ad" --shape "$SHAPE" \
+                         --shape-config "{\"ocpus\":$ocpus,\"memoryInGBs\":$mem}" \
+                         --image-id "$image" --subnet-id "$subnet" --assign-public-ip true \
+                         --metadata file:///tmp/meta.json --display-name hermes-vps \
+                         --wait-for-state RUNNING --max-wait-seconds 300 --wait-interval-seconds 15 \
+                         --query 'data.id' --raw-output 2>/tmp/err) || inst=""
+                out=$(cat /tmp/err 2>/dev/null || true)
 
-              if [ -n "${inst:-}" ] && printf '%s' "$inst" | grep -q 'ocid1.instance'; then
-                echo "  [$r/$ad] RUNNING $inst"
-                finish "$r" "$inst"
-                return 0
-              fi
-              if printf '%s' "$out" | grep -qiE 'out of host capacity|out of capacity|capacity'; then
-                echo "  [$r/$ad] out-of-capacity"
-              elif printf '%s' "$out" | grep -qiE 'LimitExceeded|service limit|quota'; then
-                echo "  [$r/$ad] quota/limit reached — skipping region:"; printf '%s\n' "$out" | head -40
-                return 1
-              else
-                echo "  [$r/$ad] non-capacity failure (full error):"; printf '%s\n' "$out" | head -40
-              fi
+                if [ -n "${inst:-}" ] && printf '%s' "$inst" | grep -q 'ocid1.instance'; then
+                  echo "  [$r/$ad] RUNNING ${ocpus}/${mem} $inst"
+                  finish "$r" "$inst" "${ocpus}/${mem}"
+                  return 0
+                fi
+                if printf '%s' "$out" | grep -qiE 'out of host capacity|out of capacity|capacity'; then
+                  echo "  [$r/$ad] out-of-capacity at ${ocpus}/${mem}"
+                  continue   # fall back to the next smaller shape, no sleep
+                elif printf '%s' "$out" | grep -qiE 'LimitExceeded|service limit|quota'; then
+                  echo "  [$r/$ad] quota/limit reached — skipping region:"; printf '%s\n' "$out" | head -40
+                  return 1
+                else
+                  echo "  [$r/$ad] non-capacity failure (full error):"; printf '%s\n' "$out" | head -40
+                  break    # not shape-specific; move to next AD
+                fi
+              done
               sleep "$GAP"
             done
             return 1
@@ -192,6 +210,16 @@ jobs:
           # "Invalid format for ssh public key".
           SSH_KEY_CLEAN=$(printf '%s' "$SSH_PUBLIC_KEY" | tr -d '\r' | awk 'NF{print; exit}')
           jq -n --arg k "$SSH_KEY_CLEAN" '{ssh_authorized_keys: $k}' > /tmp/meta.json
+
+          # Off-peak weighting: hunt hardest when US capacity is likeliest to free
+          # up — 02:00-06:00 Pacific == 09:00-13:00 UTC. Otherwise relaxed cadence.
+          HOUR=$(date -u +%H); HOUR=${HOUR#0}; HOUR=${HOUR:-0}
+          if [ "$HOUR" -ge 9 ] && [ "$HOUR" -lt 13 ]; then
+            SWEEPS="$OFFPEAK_SWEEPS"; GAP="$OFFPEAK_GAP"
+            echo "Off-peak window (09:00-13:00 UTC) — aggressive: $SWEEPS sweeps, ${GAP}s gap."
+          else
+            echo "Peak window (${HOUR}:00 UTC) — relaxed: $SWEEPS sweeps, ${GAP}s gap."
+          fi
 
           for sweep in $(seq 1 "$SWEEPS"); do
             echo "::group::Sweep $sweep/$SWEEPS"

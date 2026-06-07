@@ -42,7 +42,15 @@ us-sanjose-1
   public subnet on the fly. Idempotent — reused on later runs.
 - **Dynamic image lookup.** The latest Canonical Ubuntu 22.04 **aarch64** image
   OCID is resolved per region at run time.
-- Launches a single **4 OCPU / 24 GB** `VM.Standard.A1.Flex` (the full free A1).
+- **Shape fallback.** Each AD first tries the full **4 OCPU / 24 GB**
+  `VM.Standard.A1.Flex`; on out-of-capacity it immediately retries **2 OCPU /
+  12 GB** in the same AD before moving on. It never goes lower — 2/12 is the
+  floor for running local Ollama inference. Tiers are set via `SHAPE_CONFIGS`.
+- **Off-peak weighting.** During US off-peak (02:00–06:00 Pacific = 09:00–13:00
+  UTC) it runs more sweeps with a tighter gap (`OFFPEAK_SWEEPS` / `OFFPEAK_GAP`),
+  since free capacity is likeliest to open up then. Peak hours stay on the
+  relaxed `SWEEPS` / `GAP` cadence. The `*/5` cron + self-re-dispatch are
+  unchanged — coverage still comes from frequent runs.
 
 ## Secrets (repo → Settings → Secrets and variables → Actions)
 - `OCI_CLI_USER` — user OCID
