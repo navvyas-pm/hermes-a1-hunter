@@ -15,10 +15,12 @@ name: hermes-a1-hunt
 # two runs overlapping. cron (*/5) is a backstop; each run self-re-dispatches
 # for continuous coverage.
 #
-# Per AD it tries the full 4 OCPU / 24 GB shape, then falls back to 2 OCPU /
-# 12 GB on out-of-capacity (never lower — Ollama needs the RAM). During US
-# off-peak hours (09:00-13:00 UTC) it runs more sweeps with a tighter gap, since
-# capacity is likeliest to free up then.
+# Shape tiers come from SHAPE_CONFIGS (largest first; each AD tries them in order
+# and falls back on out-of-capacity). It currently hunts 4/24 ONLY as an upgrade
+# — a 2/12 box already exists, and the guard ignores anything below TARGET_OCPUS
+# so the hunt keeps going until the full shape lands. During US off-peak hours
+# (09:00-13:00 UTC) it runs more sweeps with a tighter gap, when capacity is
+# likeliest to free up.
 
 on:
   schedule:
@@ -54,9 +56,13 @@ jobs:
       # sweep + finish-on-first still guarantees only one instance ever lands.
       REGIONS: "us-phoenix-1 us-ashburn-1 ca-toronto-1 uk-london-1 ap-mumbai-1 us-sanjose-1"
       SHAPE: "VM.Standard.A1.Flex"
-      # OCPU/GB tiers, largest first. Each AD tries the full shape, then falls
-      # back a tier on out-of-capacity. Never below 2/12 — Ollama needs the RAM.
-      SHAPE_CONFIGS: "4/24 2/12"
+      # OCPU/GB tiers, largest first; each AD tries them in order, falling back on
+      # out-of-capacity. Now 4/24 only — we already hold a 2/12 and are hunting an
+      # upgrade to the full shape. (Re-add "2/12" to also accept the smaller box.)
+      SHAPE_CONFIGS: "4/24"
+      # Stop hunting once a RUNNING instance with at least this many OCPUs exists.
+      # Set to 4 so the existing 2-OCPU box does NOT count as "done".
+      TARGET_OCPUS: "4"
       # Peak-hours cadence (relaxed, avoids OCI TooManyRequests).
       SWEEPS: "2"        # sweeps per run before re-dispatching
       GAP: "30"          # seconds between AD attempts
@@ -74,13 +80,17 @@ jobs:
         run: |
           set -uo pipefail
 
-          # --- Already have a running instance anywhere we hunt? Then stop. ---
+          # --- Already have a RUNNING instance of the target size (>= TARGET_OCPUS)
+          #     anywhere we hunt? Then stop. A smaller box (e.g. the existing 2/12)
+          #     is ignored so the upgrade hunt keeps going. ---
           already_running() {
             local r id
             for r in $REGIONS; do
               id=$(oci compute instance list --compartment-id "$TENANCY" --region "$r" \
-                    --lifecycle-state RUNNING --query 'data[0].id' --raw-output 2>/dev/null || true)
-              if [ -n "${id:-}" ] && [ "$id" != "null" ]; then echo "$r $id"; return 0; fi
+                     --lifecycle-state RUNNING \
+                     --query 'data[].{id:id,oc:"shape-config".ocpus}' 2>/dev/null \
+                   | jq -r --argjson t "$TARGET_OCPUS" '[.[] | select((.oc // 0) >= $t)][0].id // empty' 2>/dev/null || true)
+              if [ -n "${id:-}" ]; then echo "$r $id"; return 0; fi
             done
             return 1
           }
@@ -140,8 +150,21 @@ jobs:
                      --query 'data."ip-address"' --raw-output 2>/dev/null || true)
             fi
             echo "INSTANCE READY region=$r ip=$ip shape=$shape instance=$inst"
-            gh issue create -R "$REPO" --title "✅ Hermes VPS is up — $ip ($r, ${shape} A1)" \
-              --body "Always Free A1 (${shape} OCPU/GB) landed in **$r**.  SSH: \`ssh ubuntu@$ip\`  •  instance: \`$inst\`" || true
+            gh issue create -R "$REPO" --title "⬆️ Hermes UPGRADE is up — $ip ($r, ${shape} A1)" \
+              --body "$(printf '%s\n' \
+                "The full **${shape} OCPU/GB** A1 you were hunting landed in **\`$r\`** 🎉" \
+                "" \
+                "- **New box:** \`ssh ubuntu@$ip\`" \
+                "- **Instance OCID:** \`$inst\`" \
+                "" \
+                "### Migrate off the old 2/12 box" \
+                "1. Copy your data/config to the new host (e.g. \`rsync -avz -e ssh ubuntu@OLD_IP:/path ubuntu@$ip:/path\`, or re-pull your Ollama models)." \
+                "2. Point your clients / DNS at \`$ip\`." \
+                "3. Once verified, **terminate the old 2 OCPU / 12 GB instance** so you stop paying for the overage." \
+                "" \
+                "> ⚠️ While both boxes run you have 6 OCPU total — over the 4-OCPU Always-Free A1 allowance, so the extra cores bill at the PAYG rate until the old one is terminated." \
+                "" \
+                "The hunt has disabled its own schedule.")" || true
             gh workflow disable hunt.yml -R "$REPO" || true
           }
 

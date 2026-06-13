@@ -40,10 +40,13 @@ us-phoenix-1  us-ashburn-1  ca-toronto-1  uk-london-1  ap-mumbai-1  us-sanjose-1
   public subnet on the fly. Idempotent — reused on later runs.
 - **Dynamic image lookup.** The latest Canonical Ubuntu 22.04 **aarch64** image
   OCID is resolved per region at run time.
-- **Shape fallback.** Each AD first tries the full **4 OCPU / 24 GB**
-  `VM.Standard.A1.Flex`; on out-of-capacity it immediately retries **2 OCPU /
-  12 GB** in the same AD before moving on. It never goes lower — 2/12 is the
-  floor for running local Ollama inference. Tiers are set via `SHAPE_CONFIGS`.
+- **Shape tiers (`SHAPE_CONFIGS`).** Each AD tries the configured tiers
+  largest-first, falling back on out-of-capacity. Currently **4/24 only** — a
+  2/12 box already landed, so the hunt is now chasing an **upgrade** to the full
+  shape. The `already_running` guard ignores anything below `TARGET_OCPUS` (4),
+  so the existing 2/12 doesn't count as "done"; on success the issue includes
+  migration steps. (Re-add `2/12` to `SHAPE_CONFIGS` to also accept the smaller
+  box — it's the floor for local Ollama inference.)
 - **Off-peak weighting.** During US off-peak (02:00–06:00 Pacific = 09:00–13:00
   UTC) it runs more sweeps with a tighter gap (`OFFPEAK_SWEEPS` / `OFFPEAK_GAP`),
   since free capacity is likeliest to open up then. Peak hours stay on the
