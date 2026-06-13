@@ -82,15 +82,22 @@ jobs:
 
           # --- Already have a RUNNING instance of the target size (>= TARGET_OCPUS)
           #     anywhere we hunt? Then stop. A smaller box (e.g. the existing 2/12)
-          #     is ignored so the upgrade hunt keeps going. ---
+          #     is ignored so the upgrade hunt keeps going. Reads each instance's
+          #     ocpus as a clean scalar and compares as an integer (robust). ---
           already_running() {
-            local r id
+            local r ids id oc
             for r in $REGIONS; do
-              id=$(oci compute instance list --compartment-id "$TENANCY" --region "$r" \
-                     --lifecycle-state RUNNING \
-                     --query 'data[].{id:id,oc:"shape-config".ocpus}' 2>/dev/null \
-                   | jq -r --argjson t "$TARGET_OCPUS" '[.[] | select((.oc // 0) >= $t)][0].id // empty' 2>/dev/null || true)
-              if [ -n "${id:-}" ]; then echo "$r $id"; return 0; fi
+              ids=$(oci compute instance list --compartment-id "$TENANCY" --region "$r" \
+                      --lifecycle-state RUNNING --query 'data[].id' 2>/dev/null \
+                    | jq -r '.[]?' 2>/dev/null || true)
+              for id in $ids; do
+                oc=$(oci compute instance get --instance-id "$id" --region "$r" \
+                       --query 'data."shape-config".ocpus' --raw-output 2>/dev/null || true)
+                oc=${oc%%.*}    # "2.0" -> "2"
+                [ -z "${oc:-}" ] && oc=0
+                echo "  guard: $r $id has ${oc} OCPU (target >= ${TARGET_OCPUS})" >&2
+                if [ "$oc" -ge "$TARGET_OCPUS" ] 2>/dev/null; then echo "$r $id (${oc} OCPU)"; return 0; fi
+              done
             done
             return 1
           }
