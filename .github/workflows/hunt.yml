@@ -49,9 +49,10 @@ jobs:
       SUPPRESS_LABEL_WARNING: "True"
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
-      # Home region only — this is a pure Always Free account, where A1 can only
-      # be created in the tenancy's home region. Space-separated if you add more.
-      REGIONS: "us-sanjose-1"
+      # Pay As You Go account — A1's free monthly allowance applies in any region,
+      # so hunt several. Best A1 availability first (Phoenix/Ashburn). Sequential
+      # sweep + finish-on-first still guarantees only one instance ever lands.
+      REGIONS: "us-phoenix-1 us-ashburn-1 ca-toronto-1 uk-london-1 ap-mumbai-1 us-sanjose-1"
       SHAPE: "VM.Standard.A1.Flex"
       # OCPU/GB tiers, largest first. Each AD tries the full shape, then falls
       # back a tier on out-of-capacity. Never below 2/12 — Ollama needs the RAM.

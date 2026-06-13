@@ -15,19 +15,17 @@ Runs entirely in the cloud — no local machine needs to be on. cron fires every
 
 ## Regions
 
-Currently set to the home region only, configurable via the `REGIONS` env var
-in [`hunt.yml`](.github/workflows/hunt.yml):
+Hunted in order (best A1 availability first), configurable via the `REGIONS`
+env var in [`hunt.yml`](.github/workflows/hunt.yml):
 
 ```
-us-sanjose-1
+us-phoenix-1  us-ashburn-1  ca-toronto-1  uk-london-1  ap-mumbai-1  us-sanjose-1
 ```
 
-> **Why just one region?** This is a pure *Always Free* OCI account, where A1
-> instances can only be created in the tenancy's **home region** (`us-sanjose-1`).
-> Other regions would only ever report out-of-capacity. Multi-region hunting
-> only pays off on a **Pay As You Go (upgraded)** account, where the A1 free
-> monthly allowance (3000 OCPU-hours / 18000 GB-hours) applies in any region —
-> add space-separated regions to `REGIONS` if you upgrade.
+> This is a **Pay As You Go** account, where the A1 free monthly allowance
+> (3000 OCPU-hours / 18000 GB-hours) applies in any region — so it hunts several
+> at once. On a pure *Always Free* account, A1 can only be created in the
+> tenancy's **home region**; trim `REGIONS` to just that one if you downgrade.
 
 ## How it works
 
